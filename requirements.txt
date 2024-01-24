@@ -1,0 +1,4 @@
+aiomysql==0.2.0
+deprecated==1.2.14
+pydantic==2.5.3
+PyPika==0.48.9
