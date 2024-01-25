@@ -11,17 +11,18 @@ config = DBConfig(host="127.0.0.1",
                   database="rsa")
 
 
-async def insert_rsa_session(username:        str,
-                             hashed_password: str) -> None:
+async def update_user_session(username:        str,
+                              hashed_password: str) -> None:
     async with DB(conf=config) as db:
-        await db.insert(table=TABLE,
-                        username=username,
+        await db.update(table=TABLE,
+                        where_username=username,
                         hashed_password=hashed_password)
+    return
 
 
 async def main():
-    await insert_rsa_session(username="root",
-                             hashed_password="17808bf2-8258-4408-835a-0c59b20715f3")
+    await update_user_session(username="root", hashed_password="1234567890")
+
 
 if __name__ == "__main__":
     asyncio.run(main())

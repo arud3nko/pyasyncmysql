@@ -4,14 +4,8 @@
 
 """
 
-
-from typing import Any
-
-import aiomysql
-
-from aiomysql.connection import Error
-from deprecated.sphinx import deprecated
-from pypika import Query, Table, Order
+from aiomysql.connection import Error, connect
+from pypika import Query, Table
 
 from .config import DBConfig
 
@@ -20,8 +14,6 @@ class DB:
     """
 
     Класс для асинхронной работы с БД MySQL.
-    Соединение реализуется с помощью асинхронной библиотеки aiomysql
-    Для генерации запросов используется неблокирующий pypika
 
     :param conf: Параметры БД
     """
@@ -33,7 +25,7 @@ class DB:
         self.database = conf.database
 
         self.connection = None
-        self.cursor = None
+        self._last_row_id = 0
 
     async def __aenter__(self):
         return self
@@ -42,81 +34,30 @@ class DB:
         pass
 
     async def select(self,
-                     table: str,
-                     *args:      Any) -> list:
+                     *args:    ...,
+                     table:    str,
+                     **kwargs: ...) -> tuple | None:
         """
 
-        Выборка полей из таблицы
-            > SELECT (...) FROM table
-        Если не указаны поля - полная выборка из таблицы
-            > SELECT * FROM table
+        Выборка
+            > SELECT (...) FROM table WHERE (...)
 
         :param table: Таблица
-        :param args: Поля для выборки, если не указаны > SELECT *
-        :return: Выборка
+        :param args: Поля для выборки, если не указано - выборка всех полей
+        :param kwargs: Пары ключ=значение для условий, если не указано - выборка всей таблицы
+        :return: Выборка, если выборка не содержит строк - None
         """
         table = Table(table)
-        if args:
-            q = Query.from_(table).select(*[getattr(table, arg) for arg in args])
-        else:
-            q = Query.from_(table).select(table.star)
+        q = Query.from_(table).select(*[getattr(table, arg) for arg in args]) if args else (Query.from_(table).
+                                                                                            select(table.star))
+        for key, value in kwargs.items():
+            q = q.where(getattr(table, key) == value)
         result = await self.__execute_query(q.get_sql(quote_char=None))
-        return result
-
-    async def select_where(self,
-                           table:  str,
-                           where_cond:  ...,
-                           where_value: ...) -> list | None:
-        """
-
-        Выборка по условию
-            > SELECT * FROM table WHERE where_cond = where_value
-
-        :param table: Таблица
-        :param where_cond: Параметр условия
-        :param where_value: Значение параметра
-
-        :return: Выборка, если не найдено - None
-        """
-        table = Table(table)
-        q = Query.from_(table).select(table.star).where(getattr(table, where_cond) == where_value)
-        result = await self.__execute_query(q.get_sql(quote_char=None))
-        if not result:
-            return None
-        return result
-
-    async def select_where_two(self,
-                               table:   str,
-                               where_cond:   ...,
-                               where_value:  ...,
-                               second_cond:  ...,
-                               second_value: ...) -> list | None:
-        """
-
-        Выборка по двум условиям
-            > SELECT * FROM table WHERE where_cond = where_value AND second_cond = second_value
-
-        :param table: Таблица
-        :param where_cond: Параметр 1 условия
-        :param where_value: Значение 1 параметра
-        :param second_cond: Параметр 2 условия
-        :param second_value: Значение 2 параметра
-        :return: Выборка, если не найдено - None
-
-        TODO: Убрать костыль, сделать через **kwargs
-        """
-        table = Table(table)
-        q = Query.from_(table).select(table.star).where(getattr(table, where_cond) == where_value
-                                                        and
-                                                        getattr(table, second_cond) == second_value)
-        result = await self.__execute_query(q.get_sql(quote_char=None))
-        if not result:
-            return None
-        return result
+        return result if result else None
 
     async def insert(self,
-                     table: str,
-                     **kwargs:   Any) -> int:
+                     table:    str,
+                     **kwargs: ...) -> int:
         """
 
         Добавление строки в таблицу
@@ -128,65 +69,52 @@ class DB:
         """
         q = Query.into(Table(table)).columns(*kwargs.keys()).insert(*kwargs.values())
         await self.__execute_query(q.get_sql(quote_char=None))
-        return self.cursor.rowcount
+        return self._last_row_id
 
     async def delete(self,
-                     table:  str,
-                     where_cond:  ...,
-                     where_value: ...) -> None:
+                     table:    str,
+                     **kwargs: ...) -> None:
         """
 
         Удаление строки из таблицы по условию
-            > DELETE FROM table WHERE where_cond = where_value
+            > DELETE FROM table WHERE (...)
 
         :param table: Название таблицы
-        :param where_cond: Параметр условия
-        :param where_value: Значение параметра
+        :param kwargs: Пары ключ=значение для условий, если не указано - удаление всех строк таблицы
         :return:
         """
         table = Table(table)
-        q = Query.from_(table).delete().where(getattr(table, where_cond) == where_value)
+        q = Query.from_(table).delete()
+        for key, value in kwargs.items():
+            q = q.where(getattr(table, key) == value)
         await self.__execute_query(q.get_sql(quote_char=None))
         return
 
     async def update(self,
-                     table:  str,
-                     where_cond:  ...,
-                     where_value: ...,
-                     **kwargs) -> None:
+                     table:    str,
+                     **kwargs: ...) -> None:
         """
 
-        Обновляет строку в таблице по условию
-            > UPDATE table SET (...) WHERE where_cond = where_value
+        Обновляет строку в таблице
+            > UPDATE table SET (...) WHERE (where_...)
+
+        Если условия не указаны, будут обновлены все строки
 
         :param table: Название таблицы
-        :param where_cond: Параметр условия
-        :param where_value: Значение параметра
+        :param kwargs: С префиксом where_ > пары ключ=значение для условий
+                       Без префикса > поля, которые будут обновлены
         :return:
         """
         table = Table(table)
-        q = Query.update(table).where(getattr(table, where_cond) == where_value)
+        q = Query.update(table)
         for key, value in kwargs.items():
-            q = q.set(key, value)
+            if key.startswith("where_"):
+                where_cond = key.split("where_")[-1]
+                q = q.where(getattr(table, where_cond) == value)
+            else:
+                q = q.set(key, value)
         await self.__execute_query(q.get_sql(quote_char=None))
         return
-
-    @deprecated(reason="Не используется после версии 1.1, так как после insert возвращается _id", version="1.1")
-    async def get_last_row_id(self,
-                              table: str):
-        """
-
-        Получение _id последней строки
-
-        :param table: Таблица
-        :return: _id последней строки
-        """
-        table = Table(table)
-        q = Query.from_(table).select('id').orderby('id', order=Order.desc).limit(1)
-        result = await self.__execute_query(q.get_sql(quote_char=None))
-        if not result:
-            return 1
-        return int(result[0][0])
 
     async def __connect(self) -> None:
         """
@@ -195,7 +123,7 @@ class DB:
 
         :return:
         """
-        self.connection = await aiomysql.connect(
+        self.connection = await connect(
             host=self.host,
             port=self.port,
             user=self.username,
@@ -215,8 +143,7 @@ class DB:
         self.connection.close()
         return
 
-    async def __execute_query(self,
-                              query: str) -> Any:
+    async def __execute_query(self, query: str) -> ...:
         """
 
         Выполнение запроса
@@ -224,13 +151,14 @@ class DB:
         :param query: Строка запроса
         :return: Результат
         """
+        await self.__connect()
         try:
-            await self.__connect()
-            self.cursor = await self.connection.cursor()
-            await self.cursor.execute(query)
-            result = await self.cursor.fetchall()
-            await self.connection.commit()
-            return result
+            async with self.connection.cursor() as cursor:
+                await cursor.execute(query)
+                result = await cursor.fetchall()
+                await self.connection.commit()
+                self._last_row_id = cursor.lastrowid
+                return result
         except Error:
             raise
         finally:
